@@ -20,6 +20,9 @@ import sys
 import pyhdb
 import argparse
 from prettytable import PrettyTable
+from datetime import datetime, timedelta
+import re
+
 
 def function_exit(status):
     if status == "OK":
@@ -39,7 +42,51 @@ def function_check_M_SYSTEM_OVERVIEW(section, name, type):
     resultat = cursor.fetchone()
     resultat_0 = resultat[0]
     resultat_1 = resultat[1]
-    print("%s - SAP HANA %s : %s " % (resultat_0, type, resultat_1))
+    perf = ''
+    if type == 'CPU':
+        perf = ' | '
+        available = resultat_1.split(" ")[1].replace(",","")
+        used = resultat_1.split(" ")[3]
+        perf += " '{state}'={value};;;;{max} ".format(
+            state='cpu_used', value=used, max='')
+        perf += " '{state}'={value};;;;{max} ".format(
+            state='cpu_available', value=available, max='')
+    elif re.fullmatch(r'Datafiles|Logfiles|Tracefiles', type):
+        perf = ' | '
+        #Example return string 'Size 4608.0 GB, Used 4083.0 GB, Free 12 %'
+        split_result = resultat_1.split(" ")
+        size = split_result[1]
+        size_unit = split_result[2].replace(",","")
+        perf += " '{state}'={value}{unit};;;;{max} ".format(
+            state='size', value=size, unit=size_unit, max='')        
+        used = split_result[4]
+        used_unit = split_result[5].replace(",","")
+        perf += " '{state}'={value}{unit};;;;{max} ".format(
+            state='used', value=used, unit=used_unit, max='') 
+        free = split_result[7]
+        free_unit = split_result[8]
+        perf += " '{state}'={value}{unit};;;;{max} ".format(
+            state='free', value=free, unit=free_unit, max='')
+    elif type == 'Memory':
+        #Example return string 'Physical 4031.87 GB, Swap 2.00 GB, Used 2514.05'
+        perf = ' | '
+        split_result = resultat_1.split(" ")
+        physical = split_result[1]
+        physical_unit = resultat_1.split(" ")[2].replace(",","")
+        perf += " '{state}'={value}{unit};;;;{max} ".format(
+            state='physical', value=physical, unit=physical_unit, max='')
+        swap = split_result[4]
+        swap_unit = resultat_1.split(" ")[5].replace(",","")
+        perf += " '{state}'={value}{unit};;;;{max} ".format(
+            state='swap', value=swap, unit=swap_unit, max='')
+        used = split_result[7]
+        #Used unit is not returned, so we use the same as for physical (fingercross that it is always the same)
+        used_unit = physical_unit
+        perf += " '{state}'={value}{unit};;;;{max} ".format(
+            state='used', value=used, unit=used_unit, max='')
+
+    out = "{} - SAP HANA {} : {} ".format(resultat_0, type, resultat_1)
+    print(out+perf)
     function_exit(resultat_0)
 
 
@@ -69,30 +116,42 @@ if __name__ == '__main__':
     args = parser.parse_args(sys.argv[1:])
 try:
     connection = pyhdb.connect(args.hostname, args.sqlport,
-                            args.username, args.password)
+                               args.username, args.password)
     if args.timeout != None:
         connection.timeout = int(args.timeout)
     cursor = connection.cursor()
 
     if args.mode == "backup_data":
         # -- last backups data since 3 days
-        command_sql = "SELECT count(*) FROM SYS.M_BACKUP_CATALOG where entry_type_name = 'complete data backup' and state_name = 'successful' and (sys_start_time between ADD_DAYS(current_timestamp, -3) and current_timestamp);"
-        cursor.execute(command_sql)
-        resultat = cursor.fetchone()
+        perf = ""
+        critical = 3
+        if args.critical:
+            critical = int(args.critical)
         last_successful_backup = ''
         last_successful_detail = ''
-        if resultat[0] > 0:
-            command_sql = "SELECT top 1 sys_start_time FROM SYS.M_BACKUP_CATALOG where entry_type_name = 'complete data backup' and state_name='successful'order by entry_id asc;"
-            cursor.execute(command_sql)
-            last_successful_backup = (cursor.fetchone())
-            resultat_status = 'OK'
-            last_successful_detail = 'last successful ' + \
-                str(last_successful_backup[0])
+        command_sql = "SELECT top 1 sys_start_time FROM SYS.M_BACKUP_CATALOG where entry_type_name = 'complete data backup' and state_name='successful' order by sys_start_time desc;"
+        cursor.execute(command_sql)
+        last_successful_backup = (cursor.fetchone())
+        if last_successful_backup:
+            bkp_age = datetime.now() - last_successful_backup[0]
+            bkp_age_days = int(bkp_age.total_seconds() / 86400)
+            if bkp_age >= timedelta(days=critical):
+                resultat_status = 'CRITICAL'
+                last_successful_detail = 'Complete data backup older than {} days. (last successful  : {}) '.format(
+                    critical, str(last_successful_backup[0]))
+            else:
+                resultat_status = 'OK'
+                last_successful_detail = 'Complete data backup not older than {} days(last successful  : {})'.format(
+                    critical, str(last_successful_backup[0]))
+            perf += " | '{state}'={value}s;;;;{max} ".format(
+                state='bkp_age', value=bkp_age.total_seconds(), max=critical*86400)
         else:
             resultat_status = 'CRITICAL'
-            last_successful_detail = 'No successful log backup since 3 days'
-        print("%s - SAP HANA Data Backups: %s" %
-            (resultat_status, last_successful_detail))
+            last_successful_detail = 'Could not find entry for last successful complete data backup in SYS.M_BACKUP_CATALOG.'
+        out = "{} - SAP HANA Data Backups: {}".format(
+            resultat_status, last_successful_detail)
+
+        print(out+perf)
         function_exit(resultat_status)
 
     if args.mode == "log_usage":
@@ -113,31 +172,44 @@ try:
             #print("State: {state} / USED_MB: {value} / TOTAL_MB: {max} | '{state}'={value}MB;;;;{max}".format(state = row[0],value = row[1],max = row[2]))
         print(out+perf)
     if args.mode == "backup_log":
-        # -- last backups log since 3 hours
-        command_sql = "SELECT count(*) FROM SYS.M_BACKUP_CATALOG where entry_type_name = 'log backup' and state_name = 'successful' and (sys_start_time between ADD_SECONDS(current_timestamp, -10800) and current_timestamp);"
-        cursor.execute(command_sql)
-        resultat = cursor.fetchone()
+        perf = ""
+        critical = 3
+        if args.critical:
+            critical = int(args.critical)
         last_successful_backup = ''
         last_successful_detail = ''
-        if resultat[0] > 0:
-            command_sql = "SELECT top 1 sys_start_time FROM SYS.M_BACKUP_CATALOG where entry_type_name = 'log backup' and state_name='successful' order by entry_id asc;"
-            cursor.execute(command_sql)
-            last_successful_backup = (cursor.fetchone())
-            resultat_status = 'OK'
-            last_successful_detail = 'last successful ' + \
-                str(last_successful_backup[0])
-        else:
-            command_sql = "SELECT value FROM m_inifile_contents where key='log_mode';"
-            cursor.execute(command_sql)
-            log_mode = (cursor.fetchone())
-            if log_mode[0] == "overwrite":
-                resultat_status = 'WARNING'
-                last_successful_detail = 'LOG MODE Overwrite enabled'
+        command_sql = "SELECT top 1 sys_start_time FROM SYS.M_BACKUP_CATALOG where entry_type_name = 'log backup' and state_name='successful' order by sys_start_time desc;"
+        cursor.execute(command_sql)
+        last_successful_backup = (cursor.fetchone())
+        if last_successful_backup:
+            bkp_age = datetime.now() - last_successful_backup[0]
+            bkp_age_hours = int(bkp_age.total_seconds() / 3600)
+            bkp_age_min = int(
+                (bkp_age.total_seconds() - bkp_age_hours * 3600) / 60)
+            perf += " | '{state}'={value}s;;;;{max} ".format(
+                state='bkp_age', value=bkp_age.total_seconds(), max=critical*3600)
+            if bkp_age >= timedelta(hours=critical):
+                command_sql = "SELECT value FROM m_inifile_contents where key='log_mode';"
+                cursor.execute(command_sql)
+                log_mode = (cursor.fetchone())
+                if log_mode[0] == "overwrite":
+                    resultat_status = 'WARNING'
+                    last_successful_detail = 'LOG MODE Overwrite enabled'
+                else:
+                    resultat_status = 'CRITICAL'
+                    last_successful_detail = 'Last log backup performed {}h{}m ago. (last successful  : {}) '.format(
+                        bkp_age_hours, bkp_age_min, str(last_successful_backup[0]))
             else:
-                resultat_status = 'CRITICAL'
-                last_successful_detail = 'No successful log backup since 3 hours'
-        print("%s - SAP HANA LOG Backups: %s" %
-            (resultat_status, last_successful_detail))
+                resultat_status = 'OK'
+                last_successful_detail = 'Last log backup performed {}h{}m ago. (last successful  : {})'.format(
+                    bkp_age_hours, bkp_age_min, str(last_successful_backup[0]))
+        else:
+            resultat_status = 'CRITICAL'
+            last_successful_detail = 'Could not find entry for last log backup in SYS.M_BACKUP_CATALOG.'
+        out = "{} - SAP HANA LOG Backups: {}".format(
+            resultat_status, last_successful_detail)
+
+        print(out+perf)
         function_exit(resultat_status)
 
     if args.mode == "version":
@@ -172,7 +244,7 @@ try:
         elif resultat_per_num > warning and resultat_per_num < critical:
             resultat_status = "WARNING"
         print("%s - SAP HANA Used Memory (%s) : %s GB Used / %s GB Allocated / %s GB Limit | mem=%sMB;%s;%s;0;%s" %
-            (resultat_status, resultat_percentage, resultat_0, resultat_1, resultat_2, resultat_0, value_warn, value_crit, resultat_1))
+              (resultat_status, resultat_percentage, resultat_0, resultat_1, resultat_2, resultat_0, value_warn, value_crit, resultat_1))
         function_exit(resultat_status)
 
     if args.mode == "services":
@@ -233,7 +305,7 @@ try:
         elif resultat_per_num > warning and resultat_per_num < critical:
             resultat_status = "WARNING"
         print("%s - SAP HANA license (%s) : %s GB Usage / %s GB Limit | license_usage=%sGB;%s;%s;0;%s" %
-            (resultat_status, resultat_percentage, resultat_0, resultat_1, resultat_0, warning_gb, critical_gb, resultat_1))
+              (resultat_status, resultat_percentage, resultat_0, resultat_1, resultat_0, warning_gb, critical_gb, resultat_1))
         function_exit(resultat_status)
 
     if args.mode == "db_data":
@@ -276,7 +348,7 @@ try:
                 resultat_all = resultat_all + \
                     str(row[0]) + ':' + row[1] + '(' + row[2] + ')' + '\n'
             print("%s - SAP HANA Alerts : %s |\n%s" %
-                (resultat_0, resultat_1, resultat_all))
+                  (resultat_0, resultat_1, resultat_all))
         else:
             print("%s - SAP HANA Alerts : %s " % (resultat_0, resultat_1))
         function_exit(resultat_0)
@@ -290,5 +362,5 @@ try:
     connection.commit()
     connection.close()
 except Exception as e:
-    print("CRITICAL: An error occured: {0}".format(e.strerror))
+    print("CRITICAL: An error occured: {0}".format(repr(e)))
     function_exit('CRITICAL')
