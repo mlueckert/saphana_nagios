@@ -45,7 +45,7 @@ def function_check_M_SYSTEM_OVERVIEW(section, name, type):
     perf = ''
     if type == 'CPU':
         perf = ' | '
-        available = resultat_1.split(" ")[1].replace(",","")
+        available = resultat_1.split(" ")[1].replace(",", "")
         used = resultat_1.split(" ")[3]
         perf += " '{state}'={value};;;;{max} ".format(
             state='cpu_used', value=used, max='')
@@ -53,34 +53,34 @@ def function_check_M_SYSTEM_OVERVIEW(section, name, type):
             state='cpu_available', value=available, max='')
     elif re.fullmatch(r'Datafiles|Logfiles|Tracefiles', type):
         perf = ' | '
-        #Example return string 'Size 4608.0 GB, Used 4083.0 GB, Free 12 %'
+        # Example return string 'Size 4608.0 GB, Used 4083.0 GB, Free 12 %'
         split_result = resultat_1.split(" ")
         size = split_result[1]
-        size_unit = split_result[2].replace(",","")
+        size_unit = split_result[2].replace(",", "")
         perf += " '{state}'={value}{unit};;;;{max} ".format(
-            state='size', value=size, unit=size_unit, max='')        
+            state='size', value=size, unit=size_unit, max='')
         used = split_result[4]
-        used_unit = split_result[5].replace(",","")
+        used_unit = split_result[5].replace(",", "")
         perf += " '{state}'={value}{unit};;;;{max} ".format(
-            state='used', value=used, unit=used_unit, max='') 
+            state='used', value=used, unit=used_unit, max='')
         free = split_result[7]
         free_unit = split_result[8]
         perf += " '{state}'={value}{unit};;;;{max} ".format(
             state='free', value=free, unit=free_unit, max='')
     elif type == 'Memory':
-        #Example return string 'Physical 4031.87 GB, Swap 2.00 GB, Used 2514.05'
+        # Example return string 'Physical 4031.87 GB, Swap 2.00 GB, Used 2514.05'
         perf = ' | '
         split_result = resultat_1.split(" ")
         physical = split_result[1]
-        physical_unit = resultat_1.split(" ")[2].replace(",","")
+        physical_unit = resultat_1.split(" ")[2].replace(",", "")
         perf += " '{state}'={value}{unit};;;;{max} ".format(
             state='physical', value=physical, unit=physical_unit, max='')
         swap = split_result[4]
-        swap_unit = resultat_1.split(" ")[5].replace(",","")
+        swap_unit = resultat_1.split(" ")[5].replace(",", "")
         perf += " '{state}'={value}{unit};;;;{max} ".format(
             state='swap', value=swap, unit=swap_unit, max='')
         used = split_result[7]
-        #Used unit is not returned, so we use the same as for physical (fingercross that it is always the same)
+        # Used unit is not returned, so we use the same as for physical (fingercross that it is always the same)
         used_unit = physical_unit
         perf += " '{state}'={value}{unit};;;;{max} ".format(
             state='used', value=used, unit=used_unit, max='')
@@ -124,31 +124,35 @@ try:
     if args.mode == "backup_data":
         # -- last backups data since 3 days
         perf = ""
-        critical = 3
+        critical = 1
         if args.critical:
             critical = int(args.critical)
         last_successful_backup = ''
         last_successful_detail = ''
-        command_sql = "SELECT top 1 sys_start_time FROM SYS.M_BACKUP_CATALOG where entry_type_name = 'complete data backup' and state_name='successful' order by sys_start_time desc;"
+        command_sql = "SELECT TOP 1 ENTRY_TYPE_NAME,STATE_NAME,SYS_START_TIME FROM SYS.M_BACKUP_CATALOG where (ENTRY_TYPE_NAME = 'differential data backup' or ENTRY_TYPE_NAME = 'complete data backup') and state_name='successful' order by SYS_START_TIME desc;"
         cursor.execute(command_sql)
-        last_successful_backup = (cursor.fetchone())
+        #last_successful_backup = (cursor.fetchone())
+        result = (cursor.fetchone())
+        last_successful_backup = result[2]
+        status = result[1]
+        type = (result[0]).capitalize()
         if last_successful_backup:
-            bkp_age = datetime.now() - last_successful_backup[0]
+            bkp_age = datetime.now() - last_successful_backup
             bkp_age_days = int(bkp_age.total_seconds() / 86400)
             if bkp_age >= timedelta(days=critical):
                 resultat_status = 'CRITICAL'
-                last_successful_detail = 'Complete data backup older than {} days. (last successful  : {}) '.format(
-                    critical, str(last_successful_backup[0]))
+                last_successful_detail = '{} older than {} days. (last successful: {}) '.format(
+                    type, critical, str(last_successful_backup))
             else:
                 resultat_status = 'OK'
-                last_successful_detail = 'Complete data backup not older than {} days(last successful  : {})'.format(
-                    critical, str(last_successful_backup[0]))
+                last_successful_detail = '{} not older than {} days. (last successful: {})'.format(
+                    type, critical, str(last_successful_backup))
             perf += " | '{state}'={value}s;;;;{max} ".format(
-                state='bkp_age', value=bkp_age.total_seconds(), max=critical*86400)
+                state='bkp_age', value=int(bkp_age.total_seconds()), max=critical*86400)
         else:
             resultat_status = 'CRITICAL'
             last_successful_detail = 'Could not find entry for last successful complete data backup in SYS.M_BACKUP_CATALOG.'
-        out = "{} - SAP HANA Data Backups: {}".format(
+        out = "{} - SAP HANA Backup: {}".format(
             resultat_status, last_successful_detail)
 
         print(out+perf)
@@ -277,7 +281,7 @@ try:
         elif resultat_control <= 20:
             resultat_status = "CRITICAL"
         print("%s - SAP HANA Services. \n%s | 'services'=%s;1;20;0;100" %
-            (resultat_status, resultat_all, resultat_control))
+              (resultat_status, resultat_all, resultat_control))
         function_exit(resultat_status)
 
     if args.mode == "license_usage":
