@@ -22,6 +22,7 @@ import argparse
 from prettytable import PrettyTable
 from datetime import datetime, timedelta
 import re
+from enum import Enum
 
 
 def function_exit(status):
@@ -46,7 +47,8 @@ def function_check_M_SYSTEM_OVERVIEW(section, name, type):
     if type == 'CPU':
         perf = ' | '
         available = resultat_1.split(" ")[1].replace(",", "")
-        used = resultat_1.split(" ")[3]
+        used = "{}%".format(resultat_1.split(" ")[3])
+        resultat_1 = used
         perf += " '{state}'={value};;;;{max} ".format(
             state='cpu_used', value=used, max='')
         perf += " '{state}'={value};;;;{max} ".format(
@@ -124,7 +126,7 @@ try:
     if args.mode == "backup_data":
         # -- last backups data since 3 days
         perf = ""
-        critical = 1
+        critical = 2
         if args.critical:
             critical = int(args.critical)
         last_successful_backup = ''
@@ -237,9 +239,9 @@ try:
         resultat_0 = int(resultat[0])
         resultat_1 = int(resultat[1])
         resultat_2 = int(resultat[2])
-        value_warn = format(resultat_1 * warning / 100)
-        value_crit = format(resultat_1 * critical / 100)
-        resultat_percentage = "{0:.0%}".format(1. * resultat_0/resultat_1)
+        value_warn = format(resultat_2 * warning / 100)
+        value_crit = format(resultat_2 * critical / 100)
+        resultat_percentage = "{0:.0%}".format(1. * resultat_0/resultat_2)
         resultat_per_num = float(resultat_percentage[:-1])
         if resultat_per_num <= warning:
             resultat_status = "OK"
@@ -247,8 +249,8 @@ try:
             resultat_status = "CRITICAL"
         elif resultat_per_num > warning and resultat_per_num < critical:
             resultat_status = "WARNING"
-        print("%s - SAP HANA Used Memory (%s) : %s GB Used / %s GB Allocated / %s GB Limit | mem=%sMB;%s;%s;0;%s" %
-              (resultat_status, resultat_percentage, resultat_0, resultat_1, resultat_2, resultat_0, value_warn, value_crit, resultat_1))
+        print("%s - SAP HANA Used Memory (%s) : %s GB Used / %s GB Allocated / %s GB Limit | mem=%sGB;%s;%s;0;%s" %
+              (resultat_status, resultat_percentage, resultat_0, resultat_1, resultat_2, resultat_0, value_warn, value_crit, resultat_2))
         function_exit(resultat_status)
 
     if args.mode == "services":
@@ -336,26 +338,54 @@ try:
         # check SAP HANA services
         function_check_M_SYSTEM_OVERVIEW('Services', 'All Started', 'Services')
 
+    class AlertRatings(Enum):
+        Information = 1
+        Low = 2
+        Medium = 3
+        High = 4
+
     if args.mode == "alert":
-        # check SAP HANA cpu
-        command_sql = "SELECT STATUS,VALUE FROM SYS.M_SYSTEM_OVERVIEW WHERE SECTION='Statistics' and NAME='Alerts'"
+        warning = 3
+        critical = 4
+        if args.critical:
+            critical = int(args.critical)
+        if args.warning:
+            warning = int(args.warning)
+        # Alert rating 1 = Information; 2 = Low; 3 = Medium; 4 = High
+        command_sql = f"SELECT ALERT_RATING,ALERT_NAME,ALERT_DETAILS FROM _SYS_STATISTICS.STATISTICS_CURRENT_ALERTS WHERE ALERT_RATING >={warning}"
         cursor.execute(command_sql)
-        resultat = cursor.fetchone()
-        resultat_0 = resultat[0]
-        resultat_1 = resultat[1]
-        if resultat_0 != "OK":
-            command_sql = "SELECT ALERT_RATING,ALERT_NAME,ALERT_DETAILS FROM _SYS_STATISTICS.STATISTICS_CURRENT_ALERTS WHERE ALERT_RATING >1"
-            cursor.execute(command_sql)
-            resultat = cursor.fetchall()
-            resultat_all = ''
-            for row in resultat:
-                resultat_all = resultat_all + \
-                    str(row[0]) + ':' + row[1] + '(' + row[2] + ')' + '\n'
-            print("%s - SAP HANA Alerts : %s |\n%s" %
-                  (resultat_0, resultat_1, resultat_all))
-        else:
-            print("%s - SAP HANA Alerts : %s " % (resultat_0, resultat_1))
-        function_exit(resultat_0)
+        resultat = cursor.fetchall()
+        output = ''
+        worst_rating = 1
+        output_list = [
+            '<tr><th>Rating</th><th>Name</th><th>Details</th></tr>']
+        state = 'UNKNOWN'
+        alert_counter = 0
+        warning_counter = 0
+        critical_counter = 0
+        for row in resultat:
+            rating = row[0]
+            name = row[1]
+            details = row[2]
+            if rating > worst_rating:
+                worst_rating = rating
+            if rating == warning:
+                warning_counter += 1
+            if rating == critical:
+                critical_counter +=1
+            output_list.append('<tr><td>{} ({})</td><td>{}</td><td>{}</td></tr>'.format(
+                AlertRatings(rating).name, rating, name, details))
+            alert_counter += 1
+        if worst_rating == warning:
+            state = "WARNING"
+        if worst_rating >= critical:
+            state = "CRITICAL"
+        if alert_counter == 0 or worst_rating < AlertRatings.Medium.value:
+            state = "OK"
+        output_html = "<table>{}</table>".format("".join(output_list))
+        print("{} - {} SAP HANA Alert(s) with rating level >= {} found ({} High / {} Medium).\n{}".format(state,
+              alert_counter, AlertRatings(warning).name, critical_counter, warning_counter,output_html))
+        function_exit(state)
 
     if args.mode == "sid":
         # check SAP HANA SID
