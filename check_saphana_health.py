@@ -15,7 +15,6 @@
 #################################################
 
 
-from distutils.log import warn
 import sys
 import pyhdb
 import argparse
@@ -23,6 +22,15 @@ from prettytable import PrettyTable
 from datetime import datetime, timedelta
 import re
 from enum import Enum
+
+# Added to fix unknown encoding: cesu-8 error from Windows
+import pyhdb.cesu8
+import codecs
+codecs.register(lambda s: (
+    pyhdb.cesu8.CESU8_CODEC_INFO
+    if s in {'cesu-8', 'cesu_8'}
+    else None
+))
 
 
 def function_exit(status):
@@ -55,34 +63,34 @@ def function_check_M_SYSTEM_OVERVIEW(section, name, type):
             state='cpu_available', value=available, max='')
     elif re.fullmatch(r'Datafiles|Logfiles|Tracefiles', type):
         perf = ' | '
-        #Example return string 'Size 4608.0 GB, Used 4083.0 GB, Free 12 %'
+        # Example return string 'Size 4608.0 GB, Used 4083.0 GB, Free 12 %'
         split_result = resultat_1.split(" ")
         size = split_result[1]
-        size_unit = split_result[2].replace(",","")
+        size_unit = split_result[2].replace(",", "")
         perf += " '{state}'={value}{unit};;;;{max} ".format(
-            state='size', value=size, unit=size_unit, max='')        
+            state='size', value=size, unit=size_unit, max='')
         used = split_result[4]
-        used_unit = split_result[5].replace(",","")
+        used_unit = split_result[5].replace(",", "")
         perf += " '{state}'={value}{unit};;;;{max} ".format(
-            state='used', value=used, unit=used_unit, max='') 
+            state='used', value=used, unit=used_unit, max='')
         free = split_result[7]
         free_unit = split_result[8]
         perf += " '{state}'={value}{unit};;;;{max} ".format(
             state='free', value=free, unit=free_unit, max='')
     elif type == 'Memory':
-        #Example return string 'Physical 4031.87 GB, Swap 2.00 GB, Used 2514.05'
+        # Example return string 'Physical 4031.87 GB, Swap 2.00 GB, Used 2514.05'
         perf = ' | '
         split_result = resultat_1.split(" ")
         physical = split_result[1]
-        physical_unit = resultat_1.split(" ")[2].replace(",","")
+        physical_unit = resultat_1.split(" ")[2].replace(",", "")
         perf += " '{state}'={value}{unit};;;;{max} ".format(
             state='physical', value=physical, unit=physical_unit, max='')
         swap = split_result[4]
-        swap_unit = resultat_1.split(" ")[5].replace(",","")
+        swap_unit = resultat_1.split(" ")[5].replace(",", "")
         perf += " '{state}'={value}{unit};;;;{max} ".format(
             state='swap', value=swap, unit=swap_unit, max='')
         used = split_result[7]
-        #Used unit is not returned, so we use the same as for physical (fingercross that it is always the same)
+        # Used unit is not returned, so we use the same as for physical (fingercross that it is always the same)
         used_unit = physical_unit
         perf += " '{state}'={value}{unit};;;;{max} ".format(
             state='used', value=used, unit=used_unit, max='')
@@ -107,7 +115,7 @@ if __name__ == '__main__':
     requiredNamed.add_argument(
         '--sqlport', help="SAP HANA SQL port", required=True)
     requiredNamed.add_argument(
-        '--mode', help="backup_data, backup_log , version, cpu, memory, mem_host, services, services_all, license_usage, db_data, db_log, db_trace, alert, sid, log_usage")
+        '--mode', help="backup_data, backup_log , version, cpu, memory, mem_host, services, services_all, license_usage, db_data, db_log, db_trace, alert, sid, log_usage, raw_record_count")
     requiredNamed.add_argument(
         '--warning', help="Warning threshold for modes supporting it.")
     requiredNamed.add_argument(
@@ -145,7 +153,7 @@ try:
             if bkp_age >= timedelta(days=critical):
                 resultat_status = 'CRITICAL'
                 last_successful_detail = '{} older than {} days. (last successful: {}) '.format(
-                   type, critical, str(last_successful_backup))
+                    type, critical, str(last_successful_backup))
             else:
                 resultat_status = 'OK'
                 last_successful_detail = '{} not older than {} days. (last successful: {})'.format(
@@ -252,6 +260,80 @@ try:
             resultat_status = "WARNING"
         print("%s - SAP HANA Used Memory (%s) : %s GB Used / %s GB Allocated / %s GB Limit | mem=%sGB;%s;%s;0;%s" %
               (resultat_status, resultat_percentage, resultat_0, resultat_1, resultat_2, resultat_0, value_warn, value_crit, resultat_2))
+        function_exit(resultat_status)
+
+    if args.mode == "raw_record_count":
+        table_limit = 15 # Only the largest 15 Tables will be shown
+        max_rows = 2_147_483_648 # Hard Limit from SAP
+        total_record_warning = 1_400_000_000
+        total_record_critical = 1_700_000_000
+        delta_record_warning = 100_000_000
+        delta_record_critical = 110_000_000
+        if args.warning and ":" in args.warning:
+            total_record_warning = int(float(args.warning.split(":")[0]))
+            delta_record_warning = int(float(args.warning.split(":")[1]))
+        else:
+            raise Exception("Argument warning is empty or not in format w1:w2")
+        if args.critical and ":" in args.critical:
+            total_record_critical = int(float(args.critical.split(":")[0]))
+            delta_record_critical = int(float(args.critical.split(":")[1]))
+        else:
+            raise Exception("Argument critical is empty or not in format w1:w2")
+        #The query will return the results already ordered so we know the first entry is the largest
+        command_sql = f"select HOST, SCHEMA_NAME, TABLE_NAME, PART_ID, LAST_MERGE_TIME, RECORD_COUNT, RAW_RECORD_COUNT_IN_MAIN, RAW_RECORD_COUNT_IN_DELTA, RAW_RECORD_COUNT_IN_MAIN + RAW_RECORD_COUNT_IN_DELTA as TOTAL_RECORD from M_CS_TABLES where (RAW_RECORD_COUNT_IN_MAIN + RAW_RECORD_COUNT_IN_DELTA) > {total_record_warning} or RAW_RECORD_COUNT_IN_DELTA > {delta_record_warning} order by TOTAL_RECORD DESC LIMIT {table_limit};"
+
+        cursor.execute(command_sql)
+        resultat = cursor.fetchall()
+        if not resultat:
+            print(f"OK - No table found with more than {total_record_warning:,} total records and {delta_record_warning:,} records in delta.")
+            function_exit("OK")
+        
+        largest_total_record = max(resultat, key=lambda item: item[8])
+        largest_delta_record = max(resultat, key=lambda item: item[7])
+        if largest_total_record[8] > total_record_critical or largest_delta_record[7] > delta_record_critical:
+            resultat_status = "CRITICAL"
+        else:
+            resultat_status = "WARNING"
+        style = f'style="border: 1px solid;"'
+        output_list = [
+            f'<tr><th {style}>Table Name</th><th {style}>Partition ID</th><th {style}>Total Record</th><th {style}>Raw Record in Delta</th></tr>']
+        output_text = []
+        tables_critical = []
+        tables_warning = []
+        perf = ' | '
+        for row in resultat:
+            table_name = row[2]
+            total_record = int(row[8])
+            raw_record_in_delta = int(row[7])
+            partition_id = int(row[3])
+            
+            if total_record > total_record_critical:
+                total_record_color = "red"
+                tables_critical.append(table_name)
+            elif total_record > total_record_warning:
+                total_record_color = "yellow"
+                tables_warning.append(table_name)
+            else:
+                total_record_color = "transparent"
+
+            if raw_record_in_delta > delta_record_critical:
+                delta_record_color = "red"
+                tables_critical.append(table_name)
+            elif raw_record_in_delta > delta_record_warning:
+                delta_record_color = "yellow"
+                tables_warning.append(table_name)
+            else:
+                delta_record_color = "transparent"
+            #'label'=value[UOM];[warn];[crit];[min];[max]
+            perf += f" '{table_name}_total_records'={total_record};{total_record_warning};{total_record_critical};;{max_rows} "
+            perf += f" '{table_name}_delta_records'={raw_record_in_delta};{delta_record_warning};{delta_record_critical};; "
+            total_record_style = f'style="border: 1px solid;background-color: {total_record_color};"'
+            delta_record_style = f'style="border: 1px solid;background-color: {delta_record_color};"'
+            output_list.append(f"<tr><td {style}>{table_name}</td><td {style}>{partition_id}</td><td {total_record_style}>{total_record:,}</td><td {delta_record_style}>{raw_record_in_delta:,}</td></tr>")
+            output_text.append("")
+
+        output_html = '<table style="border-collapse: collapse;">{}</table>'.format("".join(output_list))
+        print(f"{resultat_status} - Critical tables {tables_critical} - Warning tables {tables_warning}\n{output_html}{perf}")
         function_exit(resultat_status)
 
     if args.mode == "services":
@@ -373,7 +455,7 @@ try:
             if rating == warning:
                 warning_counter += 1
             if rating == critical:
-                critical_counter +=1
+                critical_counter += 1
             output_list.append('<tr><td>{} ({})</td><td>{}</td><td>{}</td></tr>'.format(
                 AlertRatings(rating).name, rating, name, details))
             alert_counter += 1
@@ -385,7 +467,7 @@ try:
             state = "OK"
         output_html = "<table>{}</table>".format("".join(output_list))
         print("{} - {} SAP HANA Alert(s) with rating level >= {} found ({} High / {} Medium).\n{}".format(state,
-              alert_counter, AlertRatings(warning).name, critical_counter, warning_counter,output_html))
+              alert_counter, AlertRatings(warning).name, critical_counter, warning_counter, output_html))
         function_exit(state)
 
     if args.mode == "sid":
