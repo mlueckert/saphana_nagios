@@ -117,7 +117,7 @@ if __name__ == "__main__":
     requiredNamed.add_argument("--sqlport", help="SAP HANA SQL port", required=True)
     requiredNamed.add_argument(
         "--mode",
-        help="backup_data, backup_log , version, cpu, memory, mem_host, services, services_all, license_usage, db_data, db_log, db_trace, alert, sid, log_usage, raw_record_count, plc_replication",
+        help="backup_data, backup_log , version, cpu, memory, mem_host, services, services_all, license_usage, db_data, db_log, db_trace, alert, sid, log_usage, raw_record_count, plc_replication, backup_alert",
     )
     requiredNamed.add_argument(
         "--warning", help="Warning threshold for modes supporting it."
@@ -125,6 +125,7 @@ if __name__ == "__main__":
     requiredNamed.add_argument(
         "--critical", help="Critical threshold for modes supporting it."
     )
+    requiredNamed.add_argument("--alert_filter", help="comma seperated list of alert ids to use with mode alert")
     requiredNamed.add_argument("--timeout", help="increase the default (60s) timeout")
 
     args = parser.parse_args(sys.argv[1:])
@@ -498,6 +499,7 @@ try:
 
         jobs_done = 0
         output = []
+        run_ids = []
         jobs_last_run = None
         jobs_last_run_id = None
         for row in results:
@@ -515,10 +517,12 @@ try:
                     output.append(
                         f'Job {run_id} finished at {finished_time.strftime("%d/%m/%y %H:%M")}'
                     )
+                    run_ids.append(run_id)
 
         if output:
             newline_char = "<br>"
-            print(f"OK: {jobs_done} replication job(s) finished during the last {critical}h.\n{newline_char.join(output)}")
+            space_char = " "
+            print(f"OK: {jobs_done} replication job(s) {space_char.join(run_ids)} finished during the last {critical}h.\n{newline_char.join(output)}")
             return_state = "OK"
         else:
             last_run_text = ""
@@ -538,20 +542,35 @@ try:
         Medium = 3
         High = 4
 
-    if args.mode == "alert":
+    if args.mode == "backup_alert":
+        #https://userapps.support.sap.com/sap/support/knowledge/en/3339034
+        #ID 65 = 2127874 - HANA alert-65 [long running backups]
+        #ID 36 = 1900795 - How to handle HANA alert 36: 'Status of Most Recent Data Backup'
+        args.alert_filter = "65,36"
+
+    if args.mode == "alert" or args.mode == "backup_alert":
         warning = 3
         critical = 4
+        alert_filter = ""
+        output_alert_filter = ""
+        sql_alert_filter = ""
         if args.critical:
             critical = int(args.critical)
         if args.warning:
             warning = int(args.warning)
+        if args.alert_filter:
+            match = re.fullmatch(r"^\d+(?:,\d+)*$", args.alert_filter)
+            if match:
+                output_alert_filter = f"IDs {args.alert_filter} and "
+                sql_alert_filter = f" AND ALERT_ID IN ({args.alert_filter})"
+                
         # Alert rating 1 = Information; 2 = Low; 3 = Medium; 4 = High
-        command_sql = f"SELECT ALERT_RATING,ALERT_NAME,ALERT_DETAILS FROM _SYS_STATISTICS.STATISTICS_CURRENT_ALERTS WHERE ALERT_RATING >={warning}"
+        command_sql = f"SELECT ALERT_RATING,ALERT_NAME,ALERT_DETAILS,ALERT_ID FROM _SYS_STATISTICS.STATISTICS_CURRENT_ALERTS WHERE ALERT_RATING >={warning}{sql_alert_filter}"
         cursor.execute(command_sql)
         resultat = cursor.fetchall()
         output = ""
         worst_rating = 1
-        output_list = ["<tr><th>Rating</th><th>Name</th><th>Details</th></tr>"]
+        output_list = ["<tr><th>Rating</th><th>ID</th><th>Name</th><th>Details</th></tr>"]
         state = "UNKNOWN"
         alert_counter = 0
         warning_counter = 0
@@ -560,6 +579,7 @@ try:
             rating = row[0]
             name = row[1]
             details = row[2]
+            id = row[3]
             if rating > worst_rating:
                 worst_rating = rating
             if rating == warning:
@@ -567,8 +587,8 @@ try:
             if rating == critical:
                 critical_counter += 1
             output_list.append(
-                "<tr><td>{} ({})</td><td>{}</td><td>{}</td></tr>".format(
-                    AlertRatings(rating).name, rating, name, details
+                "<tr><td>{} ({})</td><td>{}</td><td>{}</td><td>{}</td></tr>".format(
+                    AlertRatings(rating).name ,rating, id, name, details
                 )
             )
             alert_counter += 1
@@ -578,11 +598,15 @@ try:
             state = "CRITICAL"
         if alert_counter == 0 or worst_rating < AlertRatings.Medium.value:
             state = "OK"
-        output_html = "<table>{}</table>".format("".join(output_list))
+        if len(output_list) > 1:
+            output_html = "\n<table>{}</table>".format("".join(output_list))
+        else:
+            output_html = ""
         print(
-            "{} - {} SAP HANA Alert(s) with rating level >= {} found ({} High / {} Medium).\n{}".format(
+            "{} - {} SAP HANA Alert(s) with {}rating level >= {} found ({} High / {} Medium).{}".format(
                 state,
                 alert_counter,
+                output_alert_filter,
                 AlertRatings(warning).name,
                 critical_counter,
                 warning_counter,
